@@ -1,0 +1,616 @@
+---
+title: "Landlocked Atlantic Salmon Boquet River Redd Survey Summary Report"
+author: "US Fish and Wildlife Service (contact: Jonah_Withers@fws.gov for issues)"
+date: "Report run on: `r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Data Import, include=FALSE, echo=FALSE}
+# Libraries ----
+# Clean house! ----
+rm(list = ls()) # Clear environment
+gc() # Clear ram
+
+requiredPackages <- c("dplyr", "lubridate","scales", "ggplot2", "RODBC","data.table",
+                      "sp", "sf", "knitr", "leaflet", "maps", "knitr", "waterData",
+                      "kableExtra", "ztable", "randomcoloR", "arcgisbinding")
+
+# Function to install any packages not installed
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg))
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+# Load packages
+ipak(requiredPackages)
+
+
+# if(!require(devtools)) install.packages("devtools")
+# devtools::install_github("cardiomoon/ztable")
+
+
+# Import and process data ----
+# > Connect to access database ####
+
+# identify channel to connect to database
+channel <- odbcDriverConnect("Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=./AtlanticSalmonReddSurveyLakeChamplainTrib.accdb")
+
+# Look at tables and queries within database
+sqlTables(channel)
+
+Loc.0 <- as.data.frame(sqlFetch(channel, "tbl_Location"))
+Trip.0 <- as.data.frame(sqlFetch(channel, "tbl_Trip"))
+Redds.0 <- as.data.frame(sqlFetch(channel, "tbl_Redd"))
+Fish.0 <- as.data.frame(sqlFetch(channel, "tbl_Fish"))
+GPS.0 <- as.data.frame(sqlFetch(channel, "tbl_GPSUPload"))
+
+# Close connection to databse
+odbcClose(channel)
+
+
+
+
+
+# Reformat ----
+Loc.1 <- Loc.0 %>% 
+  mutate(Tributary = as.character(Tributary),
+         RiverSection = as.character(RiverSection),
+         Site_ID = as.character(Site_ID))
+
+Trip.1 <- Trip.0 %>% 
+  mutate(Site_ID = as.character(Site_ID),
+         Crew = as.character(Crew),
+         Weather = as.character(Weather),
+         TripComments = as.character(TripComments))
+
+Redds.1 <- Redds.0 %>% 
+  mutate(GPS_ID = as.character(GPS_ID),
+         Species = as.character(Species),
+         ReddComments = as.character(ReddComments))
+
+Fish.1 <- Fish.0 %>% 
+  mutate(Species = as.character(Species),
+         Sex = as.character(Sex),
+         GPS_ID = as.character(GPS_ID),
+         FloyTag = as.character(FloyTag),
+         FishComments = as.character(FishComments))
+
+GPS.1 <- GPS.0 %>% 
+  mutate(GPS_ID = as.character(GPS_ID))
+
+
+
+
+
+# Join tables ----
+# > Redds ####
+Redds.2 <- Redds.1 %>%
+  left_join(GPS.1, by = "GPS_ID") %>%
+  left_join(Trip.1, by = "Trip_ID") %>%
+  left_join(Loc.1 %>%
+               mutate(Tributary = as.character(Tributary)) %>%
+               dplyr::select(Tributary, Site_ID), by = "Site_ID") %>% 
+  mutate(SampYear = year(TripDate))
+  
+# Parse by tributary
+Win.Redds <- Redds.2 %>% 
+  filter(Tributary == "Winooski River")
+
+Boq.Redds <- Redds.2 %>% 
+  filter(Tributary == "Boquet River")
+
+# Parse by tributary
+Win.Redds <- Redds.2 %>% 
+  filter(Tributary == "Winooski River")
+
+Boq.Redds <- Redds.2 %>% 
+  filter(Tributary == "Boquet River")
+
+# > Fish ####
+Fish.2 <- Fish.1 %>%
+  left_join(GPS.1, by = "GPS_ID") %>%
+  left_join(Trip.1, by = "Trip_ID") %>%
+  left_join(Loc.1 %>%
+              mutate(Tributary = as.character(Tributary)) %>%
+              dplyr::select(Tributary, Site_ID), by = "Site_ID") %>% 
+  mutate(SampYear = year(TripDate))
+
+# Parse by tributary
+Win.Fish <- Fish.2 %>% 
+  filter(Tributary == "Winooski River")
+
+Boq.Fish <- Fish.2 %>% 
+  filter(Tributary == "Boquet River")
+
+
+
+
+
+# Flows ----
+Flow.0 <- importDVs(staid = "04276500", 
+                     code = "00060",
+                     # stat = "00003", 
+                     sdate = as.Date(paste(as.character(year(Sys.Date())-50), "-01-01", sep = "")),
+                     edate = as.Date(Sys.Date(), format = "%Y-%m-%d"))
+ 
+Flow.1 <- Flow.0 %>% 
+  mutate(SampYear = as.numeric(format(dates, "%Y")),
+         SampMonth = as.numeric(format(dates, "%m")),
+         Sampd = as.numeric(format(dates, "%d")),
+         SampDOY = lubridate::yday(dates)) %>% 
+  filter(SampMonth > 8) #%>% 
+  # mutate(Gage.mean.cm = (Gage.mean * 12) * 2.54)
+
+Flow.mean <- Flow.1 %>% 
+  group_by(SampDOY) %>% 
+  summarise(MFlow = mean(val), SE_val = sd(val) / sqrt(n())) %>% 
+  mutate(SE_U = MFlow + SE_val,
+         SE_L = MFlow - SE_val)
+```
+
+# Introduction
+To evaluate the progress of restoring Atlantic salmon *Salmo salar* (hereafter referred to as salmon) to the Lake Champlain basin, the Strategic Plan for Lake Champlain Fisheries 2020 emphasizes the importance of monitoring the recruitment of salmon to each river and accessing preferred habitat followed by their subsequent spawning success and recruitment of fry (Hurst et al. 2020). Atlantic salmon, along with other *Salmonidae* species, are gravel nest spawners (Eddy and Underhill 1978). Females excavate substrate and deposit eggs which are externally fertilized by males before the female covers the fertilized eggs with substrate. The contiguous deposition of nests has been termed a "redd" and can be used as an indicator of spawner abundance and to identifiy the spatiotemporal distribution of spawning habitats used by spawners (Kuligowski et al. 2005). 
+
+The Boquet River is a tributary located on the western shore of Lake Champlain. The river originates in the high peaks of the Adirondack Mountains and flows east approximately 65 kilometers before emptying into Lake Champlain. The river is composed of two branches, the main stem and the north branch that flow through forest and farm land. Stocking of fry and parr salmon has occurred in various locations throughout the Boquet River; however, an impoundment, among other factors, in Willsboro, NY was suspected to be impeding the re-establishment of spawning-adults upstream to their stocking locations. In August 2015, the Willsboro dam, located 3.2 kilometers upstream of the mouth of the Boquet River, was removed to provide salmon with greater access to historic and preferred spawning grounds. Following the removal of the dam, the the US Fish and Wildlife Service (USFWS) and partners established an annual redd survey monitoring program to assess spawner abundance and spawning habitat use in newly accessible habitat. 
+
+### Trap & Transport
+To assess salmon passage efficiency at the Willsboro cascades after the removal of the dam, fyke nets were deployed upstream and downstream of the cascades in 2015. Results from the 2015 upstream passage assessment found salmon upstream passage was not occuring; therefore, a trap and transport program was implemented in 2016 and 2017, where staff from the USFWS and Concordia University captured migrating adult salmon around the Willsboro cascades (denoted by green markers) and translocated them upstream to suspected historic spawning grounds and preferred habitat (North Branch; Hill et al. 2019). In the fall of 2016, 81 adult salmon (32 females and 49 males) were translocated to Reber and in the fall of 2017 a total of 65 adult salmon (19 females and 46 males) were translocated to Reber and 22 adult salmon (10 females and 12 males) were translocated to Moss Road (denoted by white markers). In subsequent springs, biologists collected fry emerging from redds identified in the previous falls. Using genetic parentage analysis, it was determined that the emerging fry were not produced by translocated adult salmon; therefore, the trap and transport was discontinued.
+```{r Translocated Salmon, include=FALSE, echo=FALSE}
+Translocated.0 <- read.csv("./AdultSalmonLocations/TrapAndTransport2016_2017.csv",
+                           header = TRUE,
+                           stringsAsFactors = FALSE)
+ 
+my.icons.0 <- makeAwesomeIcon(icon = 'circle', 
+                            iconColor = "black",
+                            markerColor = Translocated.0$IconColor,
+                            library = 'fa')
+ 
+map.0 <- leaflet(Translocated.0) %>%
+   addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+   addAwesomeMarkers(lng = ~ Long,
+              lat = ~ Lat,
+              icon = ~ my.icons.0,
+              label = ~ Location) %>% 
+   addScaleBar(position = "topright") %>%
+  setView(-73.457134, 44.320091, zoom = 12)
+```
+
+```{r Map Translocated Salmon, echo=FALSE, include=TRUE}
+map.0
+```
+
+
+### Broodstock Outplanting 
+Additionally, in the fall of 2020 and 2021, adult salmon broodstock were outplanted in the North Branch of the river to faciliate natural reproduction and evaluate broodstock outplanting as an alternative stocking strategy intended to facilitate early-life imprinting and improved survival and return rates. In the fall of 2020 (blue markers), 195 adult broodstock (65 at Hutchins Swamp Lane Site 1, 63 at Hutchins Swamp Lane Site 2, and 67 at Moss Road) were outplanted and in fall of 2021 (red markers) 168 adult broodstock were outplanted (64 at Hutchins Swamp Lane Site 1, 44 at Hutchins Swamp Lane Site 2, and 60 at Moss Road). 
+```{r Broodstock Outplants, include=FALSE, echo=FALSE}
+AdultOutplant <- read.csv("./AdultSalmonLocations/AdultOutplantFall2020_siteLocations.csv",
+                           header = TRUE,
+                           stringsAsFactors = FALSE) %>% 
+   na.omit()
+ 
+AdultOutplant.1 <- AdultOutplant %>% 
+   mutate(DateStock = as.Date(DateStock, format = "%m/%d/%Y"),
+     iconcolor = case_when(
+     DateStock > as.Date("2021-01-01") ~ "red",
+     DateStock < as.Date("2021-01-01") ~ "blue"),
+     Lat = ifelse(DateStock > as.Date("2021-01-01"), Lat + .00015, Lat)) # Shift waypoint slightly so they are not on top of one another
+
+my.icons.1 <- makeAwesomeIcon(icon = 'dot', 
+                            iconColor = "white",
+                            markerColor = AdultOutplant.1$iconcolor,
+                            library = 'ion')
+ 
+map.1 <- leaflet(AdultOutplant.1) %>%
+   addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+   addAwesomeMarkers(lng = ~ Long,
+              lat = ~ Lat,
+              icon = ~ my.icons.1,
+              label = ~ AdultsStocked) %>% 
+   addScaleBar(position = "topright") %>%
+  setView(-73.457134, 44.320091, zoom = 12)
+```
+
+```{r Map Broodstock Outplants, echo=FALSE, include=TRUE}
+map.1
+```
+
+# Methods
+Between late Octobober and early December, teams of two individuals walk the designated sites looking for redds. We pair experienced surveyors with inexperienced surveyors to reduce error (Muhfeld et al. 2006). Each site is visited at least once every two weeks (replicate sampling) to ensure redds laid down early, or late, in the season are captured by the survey. For each trip to a site; trip-specific and redd-specific data are collected. Surveys start in the late morning and end in the early afternoon to maximize sunlight and visibility. All staff wear polarized sunglasses to see better into the water. 
+
+
+### Trip-Specific Data
+When a team arrives at a site, they begin at the upstream end and record the site ID, date, members of the team, start time, surface water temperature, and weather conditions. Staff then walk downstream looking for redds. Once the surveyors reach the downstream-most point of the site, they record an end time and an estimate of water clarity since water conditions can influence the accuracy of redd surveys (Dunham et al. 2001).
+
+### Redd-Specific Data
+When redds are identified, surveyors take a GPS location, physically mark the redd with flagging tape, and take measurements of the length, width, and depth of the redd. By marking the redds, we reduce the likelihood of recounting redds on subsequent visits resulting in inflated estimates of spawner abundance. Measurements of redds are used to help differentiate between redds created by other *Salmonidae* species (Eddy and Underhill 1978). Additionally, salmon can create “test” redds (incomplete redds; Dunham et al. 2001) where the female begins creating a redd but ultimately abdandons it before deposting eggs and completing the redd. 
+
+# Results
+## Current Year (`r year(Sys.Date()) - 1`)
+Similar to 2020, in 2021 surveyors observed broodstock outplants (indentified by pink FLOY tags), with redds nearby, within the North Branch near the release locations; however, fewer redds were detected below the Willsboro cascades in 2021 than 2020. This could be a result of a reduction in spawners returning to the river in 2021 compared to 2020 or there may have been greater passage efficiency over the cascades in 2021. Given flows in 2020 were below the 50 year mean on most days (drought) and higher flows in 2021 were observed, we presume there was a higher passage efficiency in 2021. Similar to previous years, a large number of redds were detected below the Willsboro cascades indicating the rapids act as a partial barrier to upstream migration.
+```{r Temperature, include=FALSE, echo=FALSE, warning=FALSE, message = FALSE}
+# # Import data ----
+# # > Connect to access database ####
+# 
+# # Identify channel to connect to database
+# channel <- odbcDriverConnect("Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=../../Habitat/HoboLoggers/Databases/HoboLogger_MetaData.accdb")
+# 
+# # Look at tables and queries within database
+# sqlTables(channel)
+# 
+# Deployments.0 <- as.data.table(sqlFetch(channel, "tbl Hobo Deployment")) # Import list of tags
+# 
+# # Close connection to database
+# odbcClose(channel)
+# 
+# 
+# 
+# 
+# # > list hobo files ####
+# df.files <- list.files(path = "../../Habitat/HoboLoggers/Downloads/BoquetRiver",
+#                        pattern = "*GMT.csv")
+# 
+# # Create shell and populate with downloads in GMT
+# df.data <- NULL
+# for(i in 1:length(df.files)){
+#   
+#   x <- fread(paste("../../Habitat/HoboLoggers/Downloads/BoquetRiver/", df.files[i], sep = ""),
+#              skip = 1,
+#              stringsAsFactors = FALSE,
+#              fill = TRUE,
+#              col.names = c("Rownumber", "TempTime", "Temp", "Coupler Detached", "Coupler Attached",
+#                            "Host Connected", "Stopped", "End of File")) 
+#    
+#   x1 <- x %>%
+#     mutate(TempTime = as.POSIXct(TempTime,
+#                                  origin = "1970-01-01",
+#                                  format = "%m/%d/%Y %I:%M:%S %p",
+#                                  tz = "GMT"),
+#            # Logger = substr(names(x)[4], start = 28, 35),
+#            # Temp = x[,3],
+#            FileName = df.files[i]) %>%
+#     dplyr::select(Rownumber, TempTime, Temp, 
+#                   # Logger, 
+#                   FileName) %>% 
+#     mutate(TempTime = as.POSIXct(paste("20", substr(TempTime, start = 3, stop = 20), sep = ""),
+#                                  origin = "1970-01-01",
+#                                  format = "%Y-%m-%d %H:%M:%S",
+#                                   tz = "UTC"))
+#   
+#   df.data <- rbind(df.data, x1)
+# }
+# 
+# 
+# 
+# df.1 <- df.data %>%
+#   mutate(TempYear = paste("20", substr(TempTime, start = 3, stop = 4), sep = ""),  # Add year
+#          FileName1 = gsub("_GMT.csv.*", "\\1", FileName)) %>%
+#   left_join(Deployments.0, c("FileName1" = "HoboID")) %>% 
+#   filter(TempTime > (as.Date(`Deployment DateTime`) + 1) & TempTime < (as.Date(`Retrieval DateTime`) - 1), # Remove data collected when logger was not deployed
+#          SiteID %in% c("BQ_Temp1", "BQ_Temp2", "BQ_Temp3", "BQ_Temp4", "BQ_Temp5", "BQ_Temp6")) %>%
+#   mutate(TempTime = with_tz(TempTime, "Etc/GMT+4")) %>%  # Convert to local time
+#   group_by(SampDate = as.Date(TempTime)) %>% 
+#   summarise(meanT = mean(Temp))
+# 
+# # Combine temperature, flow, and redds by date
+# df.comb <- Boq.Redds %>% 
+#   filter(Species == "ALS",
+#          FalseRedd == 0) %>% 
+#   mutate(TripDate = as.Date(TripDate)) %>%
+#   group_by(Site_ID, TripDate) %>% 
+#   summarise(Count = n()) %>% 
+#   dplyr::select(TripDate, Site_ID, Count) %>% 
+#   left_join(Flow.1 %>% 
+#               dplyr::select(dates, Flow = val), 
+#             by = c("TripDate" = "dates")) %>% 
+#   left_join(df.1, by = c("TripDate" = "SampDate")) %>% 
+#   mutate(SampYear = as.numeric(format(TripDate, "%Y")),
+#          SampMonth = as.numeric(format(TripDate, "%m")),
+#          SampDOY = lubridate::yday(TripDate),
+#          Faciliate = ifelse(SampYear %in% c(2016, 2017, 2020, 2021), 1, 0))
+# 
+# fit <- glm(data = df.comb %>% 
+#              filter(SampDOY > 1), Count ~ meanT * Flow * SampDOY * Faciliate + Site_ID)
+# summary(fit)
+# 
+# # By year?
+# fit <- glm(data = df.comb %>% 
+#              mutate(SampYear = lubridate::year(TripDate)) %>% 
+#              group_by(SampYear, Site_ID) %>% 
+#              mutate(YearCount = sum(Count)),
+#              YearCount ~ meanT * Flow * SampDOY + Site_ID * SampYear)
+# 
+# summary(fit)
+
+```
+
+```{r Current Map Build, include=FALSE, echo=FALSE}
+# Import river poly ----
+arc.check_product()
+arc.check_portal()
+# remotes::install_github("r-spatial/mapview@develop")
+
+# Create pointer to Living atlas dataset (Major Rivers)
+riv.0 <- arc.open("https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS/rest/services/NHDPlusV21/FeatureServer/2")
+
+# # Query by GNIS_NAME - Likely an indexed field, quick return
+riv.1 <- arc.select(riv.0, where_clause = "GNIS_NAME = 'Boquet River'")
+
+# Query by HUC extracted from REACHCODE field. NOT an indexed field, takes a couple minutes
+riv.1 <- arc.select(riv.0, where_clause = "REACHCODE LIKE '04150408%'")
+
+# Convert the arc.data object to sf
+riv.2 <- arc.data2sf(riv.1)
+
+full <- arc.open
+
+# subset data further and visualize
+riv.3 <- riv.2 %>%
+  filter(OBJECTID %in% c(197034, 197033, 197032, 197029, 196920, 196921, 196922))
+
+# Merge river sections into one polyline
+riv.4 <- riv.3 %>% 
+  st_union()
+
+# Make polyline spatially aware
+riv.5 <- st_as_sf(riv.4)
+
+# Convert polyline to UTM projection
+riv.6 <- st_transform(riv.5, 
+                sp::CRS("+proj=utm +zone=18 +datum=NAD83 +units=m +no_defs +ellps=GRS80 +towgs84=0,0,0")) 
+
+# Create a 200m boundary (making it 2D rather than 1D)
+bnd <- st_buffer(riv.6, dist = 200)
+
+# Create fish net with 100m cells
+my.grid <- st_make_grid(x = bnd, cellsize = 100) %>% 
+  st_sf(grid_id = 1:length(.))
+
+
+
+# > Overlay redds ####
+Boq.Redds.Current <- Boq.Redds %>% 
+  filter(Species == "ALS",
+         FalseRedd == 0,
+         !is.na(Latitude),
+         !is.na(Latitude),
+         SampYear == year(Sys.Date()) - 1) 
+
+# Make spatially aware
+BoqReddcoords.Current <- st_as_sf(Boq.Redds.Current, coords = c("Longitude", "Latitude"), 
+                          crs = "+init=epsg:4326", remove = FALSE)
+
+# reproject to UTM
+BoqReddcoords.Current <- st_transform(BoqReddcoords.Current, 
+                              sp::CRS("+proj=utm +zone=18 +datum=NAD83 +units=m +no_defs +ellps=GRS80 +towgs84=0,0,0"))
+
+# Clip redds to grid cells
+BoqReddGrid.Current <- st_intersection(BoqReddcoords.Current, my.grid)
+
+# Count redds per grid cell
+GridCount.Current <- BoqReddGrid.Current %>% 
+  as.data.frame() %>% 
+  group_by(grid_id) %>% 
+  summarise(Count = n())
+
+# Match counts per cell to grid
+GridCount.Current.1 <- my.grid %>% 
+  left_join(GridCount.Current, by = "grid_id") %>% 
+  mutate(Count = ifelse(is.na(Count), 0, Count))
+
+# Clip grid to river polygon 
+CropToRiver.1 <- st_intersection(GridCount.Current.1, bnd)
+
+# Reproject to wgs1984
+CropToRiver.2 <- st_transform(CropToRiver.1, 
+                      crs = "+init=epsg:4326")
+
+
+
+# > Create color bins for heatmap ####
+bins.1 <- c(0, 1, 2, 4, 8, Inf)
+pal.1 <- colorBin("YlOrRd", 
+                  domain = GridCount.Current$Count, 
+                  bins = bins.1)
+
+
+
+# > Create Leaflet ####
+map.2 <- leaflet() %>%
+    addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+    addPolygons(data = CropToRiver.2, 
+                popup = CropToRiver.2$Count,
+                label = CropToRiver.2$Count,
+                color = "#444444",
+                fillOpacity = 0.75,
+                fillColor = ~pal.1(Count))
+```
+
+## Heatmap of redds found in `r year(Sys.Date()) - 1`
+```{r Map Current, echo=FALSE, include=TRUE}
+map.2
+```
+
+### Visits to each site in `r year(Sys.Date()) - 1`
+```{r Current Trip Table, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+Trip.1 %>% 
+  filter(Site_ID %in% c("BRNB01", "BRNB02", "BRNB03", "BRNB04", "BRMS05")) %>% 
+  mutate(SampYear = as.numeric(format(TripDate, "%Y"))) %>%
+  filter(SampYear == year(Sys.Date())- 1) %>% 
+  group_by(Site_ID) %>% 
+  summarise('Total Trips' = n(), 'First Trip' = min(TripDate), 'Last Trip' = max(TripDate)) %>% 
+  kable(align = 'c',
+        caption = paste('Table 1. Number of visits to each site in ', (year(Sys.Date()) - 1), sep = "")) %>%
+  kable_classic(full_width = TRUE)
+```
+
+
+### Fall flows
+```{r Current Flows, include=TRUE, echo=FALSE, warning=FALSE}
+ggplot() +
+  geom_line(data = Flow.1 %>%
+              filter(SampYear == year(Sys.Date()) - 1), aes(x = SampDOY, y = val)) +
+  geom_line(data = Flow.mean, aes(x = SampDOY, y = MFlow, color = "red")) +
+  geom_ribbon(data = Flow.mean, aes(x = SampDOY, y = MFlow, ymax = SE_U, ymin = SE_L, alpha = 0.01, fill = "red")) +
+  labs(x = "Date", 
+       y = "Mean Daily Flow (Cubic feet per second)"
+       # color = "50 Year Mean",
+       ) + 
+  scale_x_continuous(breaks = c(244, 274, 305, 335), 
+                     labels = c("September", "October", "November", "December"), 
+                     limits = c(240, 365)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        legend.position = "none")
+``` 
+
+Figure 1. Daily mean water velocities (denoted in black) collected between September and December of `r year(Sys.Date()) - 1` and 50 year mean water velocities with standard errors (denoted in red) taken from US Geological Survey station 04276500 on `r Sys.Date()`.
+
+```{r Current Temp, include=TRUE, echo=FALSE, warning=FALSE}
+# df.1 %>% 
+#   mutate()
+```
+
+## Overall
+Salmon redd disitrbution and density throughout our study areas have varied spatially and temporally. Overall, the distribution of redds between 2015 and 2021 are strongly influenced by trap and transport activities in 2016 and 2017 as well as broodstock outplanting in 2020 and 2021. Nearly all redds detected in 2015 were located below the cascades. Given this was our first sampling year, it is possible biologists were still becoming familiar with sites and protocols on how to identify redds. Alternatively, salmon may not have ascended the cascades despite the removal of the dam. The latter alternative aligns with results from hoopnetting done below and above the cascades during fall of 2015 suggesting salmon were not ascending the cascades. Translocation events in 2016 and 2017 undoubtedly led to higher densities of redds being detected in the more upstream sites proximiate to their release locations (near Reber and Moss Road). In 2018, there were a modest number of redds detected between Reber and the confluence of the North Branch and the Mainstem. Still, the majority of redds were detected below the cascades suggesting low passage efficiency. In 2019, densities of redds upstream and downstream of the cascades were unusually low. High flow events in 2019 resulted in few visits to each site and an extemely high flow event (flooding) occurred in early November which led to scouring of substrate throughout the study area. We presume this flooding event led to the destruction of previously formed redds as well as the reduction in the creation of redds. Redd densities in the upstream-most reaches of our study area were higher in 2020 and 2021 than previous years. This was presumably due to the outplanting of broodstock along Hutchins Swamp Lane and at Moss Road. Subsequent spring electrofishing surveys were conducted to determine the parentage of redd offspring in 2021 and will occur again in 2022. Parentage analysis of young of year will help us determine what contribution broodstock had on redd creation. Results from parentage based genetic analysis are still pending.
+
+### Fall flows since 2015
+```{r All Flows, include=TRUE, echo=FALSE, warning=FALSE, message = FALSE}
+ggplot() +
+  geom_line(data = Flow.1 %>% 
+  filter(SampYear > 2014), aes(x = SampDOY, y = val)) +
+  geom_line(data = Flow.mean, aes(x = SampDOY, y = MFlow, color = "red")) +
+  geom_ribbon(data = Flow.mean, aes(x = SampDOY, y = MFlow, ymax = SE_U, ymin = SE_L, alpha = 0.01, fill = "red")) +
+  facet_wrap(. ~ SampYear) +
+  labs(x = "Date", 
+       y = "Cubic feet per second",
+       color = "50 Year Daily Mean") + 
+  scale_x_continuous(breaks = c(244, 274, 305, 335), 
+                     labels = c("September", "October", "November", "December"), 
+                     limits = c(240, 365)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        legend.position = "none")
+```
+
+Figure 2. Daily mean water velocities (denoted in black) collected between September and December and 50 year mean water velocities with standard errors (denoted in red) taken from US Geological Survey station 04276500 on `r Sys.Date()` since 2015.
+  
+
+
+
+
+```{r Overall Map Build, include=FALSE, echo=FALSE, warning=FALSE, message = FALSE}
+# Map redds across all years ----
+# Overlay redds
+Boq.Redds.All <- Boq.Redds %>% 
+  filter(Species == "ALS",
+         FalseRedd == 0,
+         !is.na(Latitude),
+         !is.na(Latitude)) 
+
+
+# Make spatially aware
+Boq.Redds.All <- st_as_sf(Boq.Redds.All, coords = c("Longitude", "Latitude"), 
+                          crs = "+init=epsg:4326", remove = FALSE)
+
+# reproject to UTM
+Boq.Redds.All <- st_transform(Boq.Redds.All, 
+                              sp::CRS("+proj=utm +zone=18 +datum=NAD83 +units=m +no_defs +ellps=GRS80 +towgs84=0,0,0"))
+
+# Clip redds to grid cells
+BoqReddGrid.All <- st_intersection(Boq.Redds.All, my.grid)
+
+# Count redds per grid cell
+GridCount.All <- BoqReddGrid.All %>% 
+  as.data.frame() %>% 
+  group_by(grid_id) %>% 
+  summarise(Count = n())
+
+# Match counts per cell to grid
+GridCount.All.1 <- my.grid %>% 
+  left_join(GridCount.All, by = "grid_id") %>% 
+  mutate(Count = ifelse(is.na(Count), 0, Count))
+
+# Clip grid to river polygon 
+CropToRiver.3 <- st_intersection(GridCount.All.1, bnd)
+
+# Reproject to wgs1984
+CropToRiver.4 <- st_transform(CropToRiver.3, 
+                      crs = "+init=epsg:4326")
+
+# > Create color bins for heatmap ####
+bins.2 <- c(0, 1, 2, 4, 8, Inf)
+pal.2 <- colorBin("YlOrRd", domain = GridCount.All$Count, bins = bins.2)
+
+
+
+
+# > Create Leaflet ####
+map.3 <- leaflet() %>%
+    addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+    addPolygons(data = CropToRiver.4, 
+                popup = CropToRiver.4$Count,
+                label = CropToRiver.4$Count,
+                color = "#444444",
+                fillOpacity = 0.75,
+                fillColor = ~pal.2(Count))
+```
+
+### Heat map of cumulative redd counts
+```{r O_Map Build, echo=FALSE, include=TRUE, warning=FALSE, message = FALSE}
+map.3
+```
+
+### Redd counts
+```{r Summary Tables, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE, results='asis'}
+# Summary tables
+options(ztable.type = "html")
+
+ztable(Boq.Redds %>%
+  filter(Species == "ALS",
+         FalseRedd == 0,
+         !is.na(Redd_ID)) %>% 
+  group_by(Site_ID, SampYear) %>% 
+  summarise("Redds" = n()) %>% 
+  reshape2::dcast(SampYear ~ Site_ID, value.var = "Redds") %>%
+  replace(is.na(.), 0) %>%
+  dplyr::select(`SampYear`, `BRNB01`, `BRNB02`, `BRNB03`, `BRNB04`, `BRMS05`) %>% 
+  tibble::column_to_rownames('SampYear'),
+   caption = "Table 2. Site specific redd counts by year.") %>% 
+  makeHeatmap()
+```
+
+### Visits to sites
+```{r Trip Table, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+Trip.1 %>% 
+  filter(Site_ID %in% c("BRNB01", "BRNB02", "BRNB03", "BRNB04", "BRMS05")) %>% 
+  mutate(SampYear = as.numeric(format(TripDate, "%Y"))) %>% 
+  group_by(SampYear, Site_ID) %>% 
+  summarise('Total Trips' = n(), 'First Trip' = min(TripDate), 'Last Trip' = max(TripDate)) %>% 
+  kable(align = 'c',
+        caption = paste("Table 3. Visits to each site by year over time.")) %>%
+  kable_classic(full_width = TRUE)
+```
+# References
+Dunham, J., B. Rieman, and K. Davis. 2001. Sources and magnitude of sampling error in redd counts for Bull Trout. North American Journal of Fisheries Management 21:343–352. 
+
+Eddy, S., and J. C. Underhill. 1978. How to Know the Freshwater Fishes, 3rd edition. Wm. C. Brown Company Publishers, Dubuque, Iowa.
+
+Hill, N.L., J.R. Trueman, A.D. Prevost, D.J. Fraser, W.R. Ardren, and J.W.A. Grant. 2019. Effect of dam removal on habitat use by spawning Atlantic salmon. Journal of Great Lakes Research 5:394–399.
+
+
+Hurst, S.S., L. Durfey, C. MacKenzie, J.E. Marsden, D.L. Parrish, and B.A. Young. 2020. Strategic Plan for Lake Champlain fisheries. Lake Champlain Fish and Wildlife Management Cooperative.
+
+Kuligowski, D.R., M.J. Ford, and B.A. Berejikian. 2005. Breeding structure of steelhead inferred from patterns of genetic relatedness among nests. Transactions of the American Fisheries Society 134:1202-1212.
+
+Muhlfeld, C. C., M. L. Taper, and D. F. Staples. 2006. Observer error structure in bull trout redd counts in Montana streams: implications for inference on true redd numbers. Transactions of the American Fisheries Society135:643–654.
+

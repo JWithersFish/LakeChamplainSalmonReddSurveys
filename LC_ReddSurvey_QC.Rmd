@@ -1,0 +1,306 @@
+---
+title: "Landlocked Atlantic Salmon Winooski and Boquet River Redd Survey Quality Control Report"
+author: "US Fish and Wildlife Service (contact: Jonah_Withers@fws.gov for issues)"
+date: "Report run on: `r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Executive Summary
+
+This document is intended to provide a coarse look at the data collected during Lake Champlain landlocked Atlantic salmon fall redd surveys. The document provides tables and visualizations intended to highlight any potential outliers. 
+
+```{r Data Import, include=FALSE, echo=FALSE}
+# Libraries ----
+# Clean house! ----
+rm(list = ls()) # Clear environment
+gc() # Clear ram
+
+requiredPackages <- c("dplyr", "lubridate","scales", "ggplot2", "RODBC", 
+                      "sp", "sf", "knitr", "leaflet", "maps", "knitr",
+                      "kableExtra", "ztable", "randomcoloR")
+
+# Function to install any packages not installed
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg))
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+# Load packages
+ipak(requiredPackages)
+
+
+if(!require(devtools)) install.packages("devtools")
+devtools::install_github("cardiomoon/ztable")
+
+
+# Import and process data ----
+# > Connect to access database ####
+
+# identify channel to connect to database
+channel <- odbcDriverConnect("Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=./AtlanticSalmonReddSurveyLakeChamplainTrib.accdb")
+
+# Look at tables and queries within database
+sqlTables(channel)
+
+Loc.0 <- as.data.frame(sqlFetch(channel, "tbl_Location"))
+Trip.0 <- as.data.frame(sqlFetch(channel, "tbl_Trip"))
+Redds.0 <- as.data.frame(sqlFetch(channel, "tbl_Redd"))
+Fish.0 <- as.data.frame(sqlFetch(channel, "tbl_Fish"))
+GPS.0 <- as.data.frame(sqlFetch(channel, "tbl_GPSUPload"))
+
+# Close connection to databse
+odbcClose(channel)
+
+
+
+
+
+# Reformat ----
+Loc.1 <- Loc.0 %>% 
+  mutate(Tributary = as.character(Tributary),
+         RiverSection = as.character(RiverSection),
+         Site_ID = as.character(Site_ID))
+
+Trip.1 <- Trip.0 %>% 
+  mutate(Site_ID = as.character(Site_ID),
+         Crew = as.character(Crew),
+         Weather = as.character(Weather),
+         TripComments = as.character(TripComments))
+
+Redds.1 <- Redds.0 %>% 
+  mutate(GPS_ID = as.character(GPS_ID),
+         Species = as.character(Species),
+         ReddComments = as.character(ReddComments))
+
+Fish.1 <- Fish.0 %>% 
+  mutate(Species = as.character(Species),
+         Sex = as.character(Sex),
+         GPS_ID = as.character(GPS_ID),
+         FloyTag = as.character(FloyTag),
+         FishComments = as.character(FishComments))
+
+GPS.1 <- GPS.0 %>% 
+  mutate(GPS_ID = as.character(GPS_ID))
+
+
+
+
+
+# Join tables ----
+# > Redds ####
+Redds.2 <- Redds.1 %>%
+  left_join(GPS.1, by = "GPS_ID") %>%
+  left_join(Trip.1, by = "Trip_ID") %>%
+  left_join(Loc.1 %>%
+               mutate(Tributary = as.character(Tributary)) %>%
+               dplyr::select(Tributary, Site_ID), by = "Site_ID") %>% 
+  mutate(SampYear = year(TripDate))
+  
+# Parse by tributary
+Win.Redds <- Redds.2 %>% 
+  filter(Tributary == "Winooski River")
+
+Boq.Redds <- Redds.2 %>% 
+  filter(Tributary == "Boquet River")
+
+# Parse by tributary
+Win.Redds <- Redds.2 %>% 
+  filter(Tributary == "Winooski River")
+
+Boq.Redds <- Redds.2 %>% 
+  filter(Tributary == "Boquet River")
+
+# > Fish ####
+Fish.2 <- Fish.1 %>%
+  left_join(GPS.1, by = "GPS_ID") %>%
+  left_join(Trip.1, by = "Trip_ID") %>%
+  left_join(Loc.1 %>%
+              mutate(Tributary = as.character(Tributary)) %>%
+              dplyr::select(Tributary, Site_ID), by = "Site_ID") %>% 
+  mutate(SampYear = year(TripDate))
+
+# Parse by tributary
+Win.Fish <- Fish.2 %>% 
+  filter(Tributary == "Winooski River")
+
+Boq.Fish <- Fish.2 %>% 
+  filter(Tributary == "Boquet River")
+```
+
+
+
+## GPS IDs
+Do counts of fish and redds all have associated GPS IDs?
+```{r Visualizations GPS IDs, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+# QC ----
+# > Redds ####
+# Same number of redds and fish with and without waypoints? 
+QC.table.1 <- data.frame(IDs = rbind(length(unique(Redds.1$Redd_ID)), length(unique(Fish.1$Fish_ID))), 
+                  `GPS Points` = rbind(length(unique(Redds.2$GPS_ID)), length(unique(Fish.2$GPS_ID)))) %>% 
+  mutate(Difference = IDs - GPS.Points)
+
+rownames(QC.table.1) <- c("Redds", "Fish")
+
+QC.table.1 %>% 
+  mutate(Difference = cell_spec(Difference, color = ifelse(Difference == 0, "black", "red"))) %>%
+  kable(escape = F, 
+        caption = "Table 1. GPS IDs",
+        booktabs = T,
+        align = "c") %>%
+  kable_styling()
+```
+
+## Surface Water Temperature
+Any outliers in terms of temperature measures collected at the start of each survey? Note that sometimes data are taken in degrees Celsius and need to be converted to degrees Fahrenheit. Temperatures in Celsius will usually be between 0-12 while temperatures in Fahrenheit should range from 32-60 in the fall. 
+```{r Visualizations Temperature, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+# > Temperture ####
+Trip.0 %>% 
+  ggplot() +
+  geom_histogram(aes(WaterTemp)) +
+  labs(x = "Water Temperature (F)",
+       y = "Count") +
+  theme_bw()
+```
+
+## Redd Distribution
+Are the redds in locations we'd expect them to be in? Note that sometimes the GPS's "jump" and waypoints might end up in a very different location than were the unit is.
+```{r Visualizations Redd Locations, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+# Map most recent detections ----
+set.seed(123)
+
+Redds.3 <- Redds.2 %>% 
+  filter(Species == "ALS",
+         !is.na(Latitude),
+         !is.na(Latitude))
+
+pal_seq_mapping <- data.frame(Site_ID = unique(as.character(Redds.3$Site_ID)),
+                                             color = randomColor(count = length(unique(Redds.3$Site_ID))))
+
+Redds.4 <- Redds.3 %>% 
+    left_join(pal_seq_mapping, by = "Site_ID")
+
+map <- leaflet(Redds.4) %>%
+  addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+  addCircleMarkers(lng = ~ Longitude,
+                   lat = ~ Latitude,
+                   color = ~ color,
+                   popup = ~ SampYear,
+                   label = ~ as.character(SampYear),
+                   opacity = .5) %>%
+  addScaleBar(position = "topright")
+
+map
+```
+
+## Redd Size
+Any outliers in terms of redd measurements? 
+```{r Visualizations Redds, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+# Do Redd measurements make sense?
+Redds.0 %>% 
+  ggplot() +
+  geom_histogram(aes(x = ReddLength, fill = factor(FalseRedd))) +
+  labs(x = "Redd length (cm)",
+       y = "Count",
+       fill = "False Redd") +
+  facet_wrap(. ~ Species) +
+  scale_fill_grey() +
+  theme_bw()
+
+Redds.0 %>% 
+  ggplot() +
+  geom_histogram(aes(x = ReddWidth, fill = factor(FalseRedd))) +
+  labs(x = "Redd width (cm)",
+       y = "Count",
+       fill = "False Redd") +
+  facet_wrap(. ~ Species) +
+  scale_fill_grey() +
+  theme_bw()
+
+# Correct count of superimposed redds?
+Redds.0 %>% 
+  ggplot() +
+  geom_histogram(aes(SuperImposed)) +
+  labs(x = "Number of Redds Superimposed",
+       y = "Count") +
+  theme_bw()
+```
+
+
+## Fish Size 
+Any outliers in terms of fish measurements? 
+```{r Visualizations Fish, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+# Correct count of Fish?
+Fish.0 %>% 
+  ggplot() +
+  geom_histogram(aes(x = Size)) +
+  labs(x = "Estimated length (in)",
+       y = "Count") +
+  facet_wrap(. ~ Species + Sex) +
+  scale_x_continuous(limits = c(0, max(Fish.0$Size, na.rm = TRUE))) +
+  theme_bw()
+```
+
+
+## Summary Tables
+Summary tables of salmon and redd detected for each section and year. Any outliers? 
+```{r Summary Tables, include=TRUE, echo=FALSE, warning=FALSE, message=FALSE, results='asis'}
+# Summary tables
+options(ztable.type="html")
+
+ztable(Win.Redds %>%
+  filter(Species == "ALS",
+         FalseRedd == 0,
+         !is.na(Redd_ID)) %>% 
+  group_by(Site_ID, SampYear) %>% 
+  summarise("Redds" = n()) %>% 
+  reshape2::dcast(SampYear ~ Site_ID, value.var = "Redds") %>%
+  replace(is.na(.), 0) %>%
+  tibble::column_to_rownames('SampYear')) %>% 
+  makeHeatmap() %>%
+  print(caption = "Table 2. Winooski Redds by Site across Years")
+
+
+ztable(Boq.Redds %>%
+  filter(Species == "ALS",
+         FalseRedd == 0,
+         !is.na(Redd_ID)) %>% 
+  group_by(Site_ID, SampYear) %>% 
+  summarise("Redds" = n()) %>% 
+  reshape2::dcast(SampYear ~ Site_ID, value.var = "Redds") %>%
+  replace(is.na(.), 0) %>%
+  dplyr::select(`SampYear`, `BRNB01`, `BRNB02`, `BRNB03`, `BRNB04`, `BRMS05`) %>% 
+  tibble::column_to_rownames('SampYear')) %>% 
+  makeHeatmap() %>%
+  print(caption = "Table 3. Boquet Redds by Site across Years")
+
+ztable(Win.Fish %>%
+  filter(Species == "ALS") %>% 
+  group_by(Site_ID, SampYear) %>% 
+  summarise("Salmon" = n()) %>% 
+  reshape2::dcast(SampYear ~ Site_ID, value.var = "Salmon") %>%
+  replace(is.na(.), 0) %>%
+  tibble::column_to_rownames('SampYear')) %>% 
+  makeHeatmap() %>%
+  print(caption = "Table 4. Winooski Salmon by Site across Years")
+
+ztable(Boq.Fish %>%
+  filter(Species == "ALS") %>% 
+  group_by(Site_ID, SampYear) %>% 
+  summarise("Salmon" = n()) %>% 
+  reshape2::dcast(SampYear ~ Site_ID, value.var = "Salmon") %>%
+  replace(is.na(.), 0) %>%
+  dplyr::select(`SampYear`, `BRNB01`, `BRNB02`, `BRNB03`, `BRNB04`, `BRMS05`) %>% 
+  tibble::column_to_rownames('SampYear')) %>% 
+  makeHeatmap() %>%
+  print(caption = "Table 5. Boquet Salmon by Site across Years")
+```
